@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-cn">
+<head>
+  <meta charset="utf-8" />
+  <title>JSON 字段顺序可视化调整器</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; background:#f6f7f9; color:#222; margin:0}
+    .wrap{max-width:1100px; margin:24px auto; padding:0 16px}
+    .card{background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:16px; box-shadow:0 1px 2px rgba(0,0,0,.04)}
+    .grid{display:grid; gap:16px}
+    @media(min-width:960px){.two{grid-template-columns:1fr 1fr}}
+    textarea{width:100%; height:260px; border:1px solid #e5e7eb; border-radius:12px; padding:10px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px}
+    button,input[type=file]::file-selector-button{cursor:pointer}
+    .btn{border:1px solid #e5e7eb; background:#fff; border-radius:12px; padding:8px 12px}
+    .btn:disabled{opacity:.5; cursor:not-allowed}
+    .row{display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; border:1px solid #e5e7eb; border-radius:12px; background:#fff}
+    .row.dragging{opacity:.6}
+    .handle{padding:4px; border-radius:8px}
+    .handle:hover{background:#f3f4f6}
+    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px}
+    .muted{color:#6b7280; font-size:12px}
+    .list{display:grid; gap:8px}
+    .crumbs{display:flex; flex-wrap:wrap; gap:4px; align-items:center}
+    .crumb{padding:4px 8px; border-radius:8px}
+    pre{max-height:420px; overflow:auto; background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; padding:12px}
+  </style>
+</head>
+<body>
+  <div class="wrap grid">
+    <h1>JSON 字段顺序可视化调整器（Python 后端 + HTML 前端）</h1>
+
+    <div class="grid two">
+      <div class="card grid">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px">
+          <strong>输入 JSON</strong>
+          <div style="display:flex; gap:8px; align-items:center">
+            <label class="btn">
+              <input id="file" type="file" accept=".json,application/json" hidden />
+              上传文件
+            </label>
+            <button id="parse" class="btn">解析</button>
+          </div>
+        </div>
+        <textarea id="src" placeholder="粘贴 JSON 文本"></textarea>
+        <div id="err" class="muted"></div>
+      </div>
+
+      <div class="card grid">
+        <div style="display:flex; justify-content:space-between; align-items:center">
+          <strong>层级与排序</strong>
+          <div style="display:flex; gap:8px">
+            <button id="toRoot" class="btn" disabled>回到根</button>
+            <button id="download" class="btn" disabled>下载 JSON</button>
+          </div>
+        </div>
+
+        <div class="crumbs">
+          <span class="muted">路径:</span>
+          <button class="btn crumb" id="crumbRoot" disabled>$</button>
+          <span id="crumbs"></span>
+        </div>
+
+        <div id="hint" class="muted">请先解析或上传 JSON。</div>
+        <div id="list" class="list"></div>
+      </div>
+    </div>
+
+    <div class="card grid">
+      <div style="display:flex; justify-content:space-between; align-items:center">
+        <strong>预览（导出即为该结果）</strong>
+        <button id="download2" class="btn" disabled>下载 JSON</button>
+      </div>
+      <pre id="preview" class="mono"></pre>
+    </div>
+
+    <details class="card">
+      <summary><strong>使用说明</strong></summary>
+      <ol>
+        <li>粘贴或上传 JSON，点“解析”。</li>
+        <li>点击对象/数组的键可进入该层级。拖动手柄调整对象内键顺序。</li>
+        <li>右上角“下载 JSON”调用后端重排并保存。</li>
+      </ol>
+    </details>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+let root = null;              // 原始 JSON
+let path = [];                // 当前路径数组
+let orders = {};              // path(string) -> string[]
+let currentNode = null;       // 当前节点
+
+// 基础工具
+const isPlainObject = (v) => Object.prototype.toString.call(v) === "[object Object]";
+const pathToString = (arr) => arr.map(seg => Number.isInteger(seg) ? `[${seg}]` : seg).join(".");
+const getAtPath = (obj, p) => p.reduce((acc, seg) => acc == null ? acc : acc[seg], obj);
+
+// 解析
+$("parse").onclick = () => {
+  $("err").textContent = "";
+  try {
+    root = JSON.parse($("src").value || "null");
+    path = [];
+    refresh();
+  } catch (e) {
+    $("err").textContent = "JSON 解析失败: " + e.message;
+  }
+};
+
+// 上传
+$("file").onchange = (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => { $("src").value = String(reader.result || ""); $("parse").click(); };
+  reader.readAsText(f, "utf-8");
+};
+
+// UI 刷新
+function refresh() {
+  currentNode = root ? getAtPath(root, path) : null;
+
+  // 面包屑
+  $("crumbRoot").disabled = !root;
+  $("toRoot").disabled = !root;
+  $("download").disabled = !root;
+  $("download2").disabled = !root;
+  $("crumbRoot").onclick = () => { path = []; refresh(); };
+  $("toRoot").onclick = () => { path = []; refresh(); };
+
+  const crumbsBox = $("crumbs");
+  crumbsBox.innerHTML = "";
+  path.forEach((seg, i) => {
+    const span = document.createElement("span");
+    span.textContent = "/";
+    const btn = document.createElement("button");
+    btn.className = "btn crumb mono";
+    btn.textContent = Number.isInteger(seg) ? `[${seg}]` : seg;
+    btn.onclick = () => { path = path.slice(0, i + 1); refresh(); };
+    crumbsBox.appendChild(span);
+    crumbsBox.appendChild(btn);
+  });
+
+  const list = $("list");
+  const hint = $("hint");
+  list.innerHTML = "";
+
+  if (!root) { hint.textContent = "请先解析或上传 JSON。"; $("preview").textContent = ""; return; }
+  if (!isPlainObject(currentNode)) { hint.textContent = "当前路径不是对象。请选择上层对象或点击包含对象/数组的键进入。"; renderPreview(); return; }
+
+  hint.textContent = "";
+  const pathKey = pathToString(path);
+  const keys = Object.keys(currentNode);
+  if (!orders[pathKey]) orders[pathKey] = keys.slice();
+  else {
+    // 保持新出现的键
+    const existing = orders[pathKey];
+    orders[pathKey] = existing.filter(k => keys.includes(k)).concat(keys.filter(k => !existing.includes(k)));
+  }
+  const ordered = orders[pathKey];
+
+  // 可拖拽列表（原生 HTML5 DnD）
+  ordered.forEach(k => {
+    const v = currentNode[k];
+    const type = Array.isArray(v) ? "array" : isPlainObject(v) ? "object" : typeof v;
+
+    const row = document.createElement("div");
+    row.className = "row";
+    row.draggable = true;
+    row.dataset.key = k;
+
+    const left = document.createElement("div");
+    left.style.display = "flex";
+    left.style.alignItems = "center";
+    left.style.gap = "8px";
+
+    const handle = document.createElement("button");
+    handle.className = "handle";
+    handle.title = "拖拽以排序";
+    handle.innerHTML = "≡";
+
+    const keyBtn = document.createElement("button");
+    keyBtn.className = "mono";
+    keyBtn.textContent = k;
+    if (type === "object" || type === "array") {
+      keyBtn.style.color = "#2563eb";
+      keyBtn.onclick = () => { path = path.concat(k); refresh(); };
+    }
+
+    left.appendChild(handle);
+    left.appendChild(keyBtn);
+
+    const right = document.createElement("span");
+    right.className = "muted mono";
+    right.textContent = type;
+
+    row.appendChild(left);
+    row.appendChild(right);
+    list.appendChild(row);
+
+    // DnD 事件
+    row.addEventListener("dragstart", (e) => {
+      row.classList.add("dragging");
+      e.dataTransfer.setData("text/plain", k);
+    });
+    row.addEventListener("dragend", () => row.classList.remove("dragging"));
+    row.addEventListener("dragover", (e) => e.preventDefault());
+    row.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const fromKey = e.dataTransfer.getData("text/plain");
+      const toKey = row.dataset.key;
+      if (!fromKey || fromKey === toKey) return;
+      const a = ordered.indexOf(fromKey);
+      const b = ordered.indexOf(toKey);
+      if (a < 0 || b < 0) return;
+      const next = ordered.slice();
+      const [moved] = next.splice(a, 1);
+      next.splice(b, 0, moved);
+      orders[pathKey] = next;
+      refresh();
+    });
+  });
+
+  renderPreview();
+}
+
+// 调后端生成预览
+async function requestReorder(base) {
+  const resp = await fetch("http://localhost:5174/api/reorder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ json: base, orders })
+  });
+  if (!resp.ok) throw new Error("reorder failed");
+  const { data } = await resp.json();
+  return data;
+}
+
+async function renderPreview() {
+  try {
+    const data = await requestReorder(root);
+    $("preview").textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    $("preview").textContent = "预览失败: " + e.message;
+  }
+}
+
+// 下载
+async function downloadNow() {
+  if (!root) return;
+  try {
+    const data = await requestReorder(root);
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "reordered.json"; a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("下载失败: " + e.message);
+  }
+}
+$("download").onclick = downloadNow;
+$("download2").onclick = downloadNow;
+</script>
+</body>
+</html>
